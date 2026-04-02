@@ -109,6 +109,55 @@ python3 ~/.cursor/skills/visual-qa/compare-screenshots.py <fileKey> <nodeId> \
 
 The Simulator must be running and showing the correct screen.
 
+### Full-page scrollable screens — iOS multi-pass (XcodeBuildMCP required)
+
+Use this flow when the Figma design is taller than the iOS viewport (i.e. the frame height in Figma is greater than the device viewport height, because the design team extended the artboard to show the full scrollable content). A single screenshot will only capture the first viewport; use this scroll-capture loop to capture all sections.
+
+**How it works:** the script downloads the full Figma frame, slices it into viewport-height chunks (one per section screenshot), diffs each pair independently, and writes one consolidated library card and report with a per-section breakdown and a weighted overall score.
+
+#### Step-by-step
+
+1. Navigate to the screen using `snapshot_ui` + `tap` as normal.
+
+2. Capture the **first section** (top of page) — save to a numbered path:
+   ```
+   XcodeBuildMCP screenshot → /tmp/sim-s01.png
+   ```
+
+3. Swipe up to scroll by one viewport height. Use XcodeBuildMCP's `swipe` tool:
+   ```
+   swipe: { direction: "up", distance: 0.85 }
+   ```
+   A `distance` of ~0.85 scrolls roughly one full viewport while leaving a small overlap. Adjust if the design uses a sticky header.
+
+4. Wait ~0.5 s for the scroll animation, then capture the **next section**:
+   ```
+   XcodeBuildMCP screenshot → /tmp/sim-s02.png
+   ```
+
+5. Repeat swipe + screenshot until the screen no longer scrolls (check that the screenshot content changed vs. the previous one — if it looks identical, stop).
+
+6. Once all sections are captured, run the script with `--sections` listing the paths in order:
+
+```bash
+python3 ~/.cursor/skills/visual-qa/compare-screenshots.py <fileKey> <nodeId> \
+  --sections /tmp/sim-s01.png /tmp/sim-s02.png /tmp/sim-s03.png \
+  --design-width 390 \
+  --screen-name "Screen Name — Full Page"
+```
+
+**Important notes for multi-pass:**
+- Always use `--sections` (not `--skip-capture`) — the script loads section files directly and does not read `SIM_PATH`.
+- Do **not** pass `--inspect-only` or `--web-screenshot` with `--sections`.
+- The last section may show partially empty space at the bottom if the page content is shorter than an exact multiple of the viewport — this is expected and scored normally.
+- Sticky headers/footers (e.g. a persistent bottom nav bar) will appear in every section screenshot but only in the correct position in each Figma slice. The diff will flag them as differences in middle sections. Note this in your checklist evaluation and treat it as expected platform behavior, not a design defect.
+
+#### Stopping criteria
+
+Stop capturing new sections when either:
+- The screenshot is pixel-identical (or near-identical) to the previous section, or
+- You have reached the bottom of the page (e.g. a footer or end-of-list marker is visible).
+
 ### Android Emulator
 
 ```bash
@@ -198,6 +247,8 @@ The library shows a card grid of all past runs — each card links to a self-con
 ## Step 6 — Checklist
 
 For every item below, state **PASS**, **FAIL**, or **N/A** with a specific observation. Never write "looks good" — state the actual value (color hex, px size, etc.) vs. what Figma shows.
+
+> **Multi-pass runs:** Work through the checklist section by section, referencing the correct section image in the report. Note any sticky elements (nav bars, headers) that appear across all sections — these are expected behavior. Evaluate content that only appears below the first viewport on the appropriate section screenshot, not the first.
 
 ### Header
 - [ ] Background color matches Figma (state the hex)

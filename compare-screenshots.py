@@ -18,6 +18,11 @@ Options:
     --inspect-only               Skip pixel diff entirely. Downloads the Figma reference for visual
                                  comparison, saves a side-by-side report, and logs the run to the library
                                  as "INSPECT". Use when screen widths differ (responsive QA).
+    --sections PATH [PATH ...]   Paths to multiple viewport screenshots captured top-to-bottom by
+                                 scrolling through a long screen. The Figma reference (full frame height)
+                                 is sliced into matching viewport chunks and each pair is diffed
+                                 independently. Results are combined into one library card and report.
+                                 Requires --skip-capture to be set (screenshots pre-captured via MCP).
 
 Requires:
     - ~/.figma_token or FIGMA_TOKEN env var (Figma personal access token)
@@ -179,6 +184,44 @@ def normalize_images(img_a, img_b, design_width_pt):
         crop_b = crop_b.resize(target, Image.LANCZOS)
 
     return crop_a, crop_b
+
+
+def slice_figma_to_sections(figma_full, section_imgs, design_width_pt):
+    """
+    Slice the full-height Figma reference into viewport-sized chunks that
+    correspond to each scrolled section screenshot.
+
+    The Figma reference is exported at scale=2 (retina). Each section screenshot
+    was captured from a fixed-width device viewport. This function:
+      1. Computes the logical viewport height from each section screenshot's dimensions
+      2. Walks down the Figma frame one viewport at a time
+      3. Crops and resizes each Figma slice to match the paired section screenshot exactly
+
+    Returns a list of (figma_slice, section_img_rgb) pairs ready for build_diff().
+    """
+    figma_scale = figma_full.width / design_width_pt
+    pairs = []
+    y_pt_offset = 0.0
+
+    for section_img in section_imgs:
+        section_rgb   = section_img.convert("RGB")
+        section_scale = section_rgb.width / design_width_pt
+        vp_height_pt  = section_rgb.height / section_scale
+
+        y0_px = int(y_pt_offset * figma_scale)
+        y1_px = int((y_pt_offset + vp_height_pt) * figma_scale)
+        y1_px = min(y1_px, figma_full.height)   # cap at bottom of Figma frame
+
+        slice_img = figma_full.crop((0, y0_px, figma_full.width, y1_px)).convert("RGB")
+
+        target = (section_rgb.width, section_rgb.height)
+        if slice_img.size != target:
+            slice_img = slice_img.resize(target, Image.LANCZOS)
+
+        pairs.append((slice_img, section_rgb))
+        y_pt_offset += vp_height_pt
+
+    return pairs
 
 
 # ── Diff ──────────────────────────────────────────────────────────────────────
@@ -418,6 +461,122 @@ def generate_inspect_report(run_dir, meta, figma_img, sim_img):
     print(f"  Inspect report saved → {run_dir / 'report.html'}")
 
 
+def generate_multipass_report(run_dir, meta, section_results):
+    """
+    Render a single consolidated HTML report for a multi-pass scrollable-screen run.
+
+    section_results: list of dicts, each containing:
+        figma_img, sim_img, diff_img, overlay_img, pct_diff, region_map
+    """
+    overall_pct     = meta["pct_diff"]
+    overall_verdict = meta["verdict"]
+    color           = VERDICT_COLOR[overall_verdict]
+    ts_display      = _format_timestamp(meta["timestamp"])
+    n_sections      = len(section_results)
+
+    # ── Per-section panels ────────────────────────────────────────────────────
+    sections_html = ""
+    for i, s in enumerate(section_results, 1):
+        s_verdict = get_verdict(s["pct_diff"])
+        s_color   = VERDICT_COLOR[s_verdict]
+        r         = s["region_map"]
+        sections_html += f"""
+<div style="margin-top:32px;padding:20px;background:#141414;border-radius:12px;
+            border:1px solid #27272a">
+  <div style="display:flex;align-items:center;justify-content:space-between;
+              margin-bottom:16px">
+    <div style="font-size:14px;font-weight:600;color:#e4e4e7">
+      Section {i} of {n_sections}
+    </div>
+    <div class="pill" style="background:{s_color}22;color:{s_color}">
+      {s_verdict} &nbsp; {s['pct_diff']:.1f}%
+    </div>
+  </div>
+  <div class="panels">
+    <div class="panel">
+      <div class="panel-label">Figma slice</div>
+      <img src="{img_to_b64(s['figma_img'])}" alt="Figma slice {i}">
+    </div>
+    <div class="panel">
+      <div class="panel-label">App screenshot</div>
+      <img src="{img_to_b64(s['sim_img'])}" alt="App section {i}">
+    </div>
+    <div class="panel">
+      <div class="panel-label">Diff (red = different)</div>
+      <img src="{img_to_b64(s['diff_img'])}" alt="Diff {i}">
+    </div>
+    <div class="panel">
+      <div class="panel-label">Side-by-side</div>
+      <img src="{img_to_b64(s['overlay_img'])}" alt="Overlay {i}">
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:80px 1fr 44px;gap:8px;
+              align-items:center;margin-top:12px;font-size:12px;color:#a1a1aa">
+    <span>Top third</span>{_bar(r.get('top',0),s_color)}
+    <span>{r.get('top',0):.1f}%</span>
+  </div>
+  <div style="display:grid;grid-template-columns:80px 1fr 44px;gap:8px;
+              align-items:center;margin-top:10px;font-size:12px;color:#a1a1aa">
+    <span>Middle</span>{_bar(r.get('middle',0),s_color)}
+    <span>{r.get('middle',0):.1f}%</span>
+  </div>
+  <div style="display:grid;grid-template-columns:80px 1fr 44px;gap:8px;
+              align-items:center;margin-top:10px;font-size:12px;color:#a1a1aa">
+    <span>Bottom</span>{_bar(r.get('bottom',0),s_color)}
+    <span>{r.get('bottom',0):.1f}%</span>
+  </div>
+</div>"""
+
+    # ── Overall score box ─────────────────────────────────────────────────────
+    section_rows = ""
+    for i, s in enumerate(section_results, 1):
+        s_color   = VERDICT_COLOR[get_verdict(s["pct_diff"])]
+        section_rows += f"""
+  <div style="display:grid;grid-template-columns:80px 1fr 44px;gap:8px;
+              align-items:center;margin-top:10px;font-size:12px;color:#a1a1aa">
+    <span>Section {i}</span>{_bar(s['pct_diff'],s_color)}
+    <span>{s['pct_diff']:.1f}%</span>
+  </div>"""
+
+    score_box = f"""
+<div style="margin-top:24px;padding:20px;background:#141414;border-radius:12px;
+            border:1px solid #27272a">
+  <div style="font-size:12px;color:#71717a;text-transform:uppercase;
+              letter-spacing:.05em;margin-bottom:8px">
+    Overall diff — {n_sections} section{"s" if n_sections != 1 else ""} (pixel-weighted average)
+  </div>
+  <div style="font-size:28px;font-weight:700;margin-bottom:10px;color:{color}">
+    {overall_pct:.1f}%
+  </div>
+  {_bar(overall_pct, color)}
+  {section_rows}
+</div>"""
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Visual QA — {meta['screen_name']}</title>
+<style>{_REPORT_BASE_STYLE}</style>
+</head>
+<body>
+<a class="back" href="../library.html">&#8592; Library</a>
+<h1>{meta['screen_name']}</h1>
+<p class="meta">
+  Node {meta['node_id']} &nbsp;&middot;&nbsp; {ts_display}
+  &nbsp;&middot;&nbsp; {n_sections}-section multi-pass
+</p>
+<div class="pill" style="background:{color}22;color:{color}">{overall_verdict}</div>
+{score_box}
+{sections_html}
+</body>
+</html>"""
+
+    (run_dir / "report.html").write_text(html, encoding="utf-8")
+    print(f"  Multi-pass report saved → {run_dir / 'report.html'}")
+
+
 def generate_library(report_dir):
     runs = []
     for d in sorted(report_dir.iterdir(), reverse=True):
@@ -445,6 +604,9 @@ def generate_library(report_dir):
         if v == "INSPECT":
             sub = (f"{run.get('captured_width','?')}px captured "
                    f"vs {run.get('design_width','?')}px design")
+        elif run.get("mode") == "multipass":
+            n = run.get("section_count", "?")
+            sub = f"{n} section{'s' if n != 1 else ''} · {run.get('pct_diff', 0):.1f}% avg diff"
         else:
             sub = f"{run.get('pct_diff', 0):.1f}% diff"
 
@@ -581,6 +743,65 @@ def save_inspect_run(report_dir, file_key, node_id, screen_name,
     return run_dir
 
 
+def save_multipass_run(report_dir, file_key, node_id, screen_name,
+                       figma_full_img, section_results, platform):
+    """
+    Persist all images and metadata for a multi-pass (scrollable screen) QA run,
+    then generate a consolidated report and update the library index.
+    """
+    report_dir, run_dir, timestamp = _make_run_dir(report_dir, node_id)
+
+    # Full Figma reference (unsliced, for reference)
+    figma_full_img.save(run_dir / "figma-ref-full.png")
+
+    # Per-section images with numbered filenames
+    for i, s in enumerate(section_results, 1):
+        suffix = f"s{i:02d}"
+        s["figma_img"].save(run_dir / f"figma-ref-{suffix}.png")
+        s["sim_img"].save(run_dir   / f"sim-{suffix}.png")
+        s["diff_img"].save(run_dir  / f"diff-{suffix}.png")
+        s["overlay_img"].save(run_dir / f"overlay-{suffix}.png")
+
+    # First section's overlay becomes the library thumbnail
+    section_results[0]["overlay_img"].save(run_dir / "diff-overlay.png")
+
+    # Pixel-count-weighted average across all sections
+    total_px = sum(
+        s["sim_img"].width * s["sim_img"].height for s in section_results
+    )
+    overall_pct = (
+        sum(s["pct_diff"] * s["sim_img"].width * s["sim_img"].height
+            for s in section_results) / total_px
+        if total_px else 0.0
+    )
+    overall_verdict = get_verdict(overall_pct)
+
+    meta = {
+        "timestamp":     timestamp,
+        "file_key":      file_key,
+        "node_id":       node_id,
+        "screen_name":   screen_name or node_id,
+        "pct_diff":      round(overall_pct, 2),
+        "verdict":       overall_verdict,
+        "mode":          "multipass",
+        "section_count": len(section_results),
+        "sections": [
+            {
+                "index":      i + 1,
+                "pct_diff":   round(s["pct_diff"], 2),
+                "verdict":    get_verdict(s["pct_diff"]),
+                "region_map": {k: round(v, 2) for k, v in s["region_map"].items()},
+            }
+            for i, s in enumerate(section_results)
+        ],
+    }
+    (run_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+
+    generate_multipass_report(run_dir, meta, section_results)
+    generate_library(report_dir)
+    return run_dir, overall_pct
+
+
 # ── Terminal report ───────────────────────────────────────────────────────────
 
 def print_report(pct_diff, region_map, report_dir=None, run_dir=None):
@@ -626,6 +847,33 @@ def print_inspect_report(design_width, captured_width, report_dir=None, run_dir=
         print(f"  Report →       {run_dir}/report.html")
     if report_dir:
         print(f"  Library →      {report_dir}/library.html")
+    print("=" * 60 + "\n")
+
+
+def print_multipass_report(section_results, overall_pct, report_dir=None, run_dir=None):
+    def bar(pct):
+        filled = int(pct / 100 * 30)
+        return "[" + "█" * filled + "░" * (30 - filled) + f"] {pct:5.1f}%"
+
+    print("\n" + "=" * 60)
+    print("  MULTI-PASS SCREENSHOT DIFF REPORT")
+    print("=" * 60)
+    for i, s in enumerate(section_results, 1):
+        print(f"  Section {i}:              {bar(s['pct_diff'])}")
+    print(f"\n  Overall (weighted avg): {bar(overall_pct)}\n")
+    print("=" * 60)
+
+    verdict_text = {
+        "PASS":   "PASS  — very close match across all sections",
+        "REVIEW": "REVIEW  — minor differences in one or more sections",
+        "FAIL":   "FAIL  — notable differences, review the diff images",
+    }[get_verdict(overall_pct)]
+
+    print(f"  Verdict:     {verdict_text}")
+    if run_dir:
+        print(f"  Run report → {run_dir}/report.html")
+    if report_dir:
+        print(f"  Library →    {report_dir}/library.html")
     print("=" * 60 + "\n")
 
 
@@ -688,6 +936,17 @@ def main():
             "Use when the screen width differs from the Figma design width."
         )
     )
+    parser.add_argument(
+        "--sections",
+        nargs="+",
+        metavar="PATH",
+        help=(
+            "Paths to pre-captured section screenshots, ordered top-to-bottom. "
+            "Triggers multi-pass mode: the Figma full-height frame is sliced into "
+            "viewport-height chunks and each pair is diffed independently. "
+            "Results are combined into one library card and report."
+        )
+    )
     args = parser.parse_args()
 
     token = read_token()
@@ -695,6 +954,61 @@ def main():
     print(f"1/4  Downloading Figma screenshot  (node {args.node_id})...")
     download_figma_screenshot(args.file_key, args.node_id, token)
 
+    # ── Multi-pass scrollable screen mode ─────────────────────────────────────
+    if args.sections:
+        figma_full = Image.open(FIGMA_REF_PATH)
+        n = len(args.sections)
+        print(f"2/4  Loading {n} section screenshot{'s' if n != 1 else ''}...")
+        section_imgs = []
+        for p in args.sections:
+            path = Path(p)
+            if not path.exists():
+                print(f"ERROR: Section screenshot not found: {p}")
+                sys.exit(1)
+            section_imgs.append(Image.open(path))
+
+        platform_key = "web" if args.platform == "web" else args.platform
+        skip_top_frac, skip_bottom_frac = SKIP_FRACTIONS.get(platform_key, (0.07, 0.04))
+
+        print(f"3/4  Slicing Figma reference into {n} section{'s' if n != 1 else ''} "
+              f"and diffing  (design width: {args.design_width}pt)...")
+        pairs = slice_figma_to_sections(figma_full, section_imgs, args.design_width)
+
+        section_results = []
+        for figma_slice, sim_section in pairs:
+            diff_img, pct_diff, region_map = build_diff(
+                figma_slice, sim_section, DIFF_THRESHOLD,
+                skip_top_frac, skip_bottom_frac
+            )
+            overlay_img = build_side_by_side(figma_slice, sim_section, diff_img)
+            section_results.append({
+                "figma_img":   figma_slice,
+                "sim_img":     sim_section,
+                "diff_img":    diff_img,
+                "overlay_img": overlay_img,
+                "pct_diff":    pct_diff,
+                "region_map":  region_map,
+            })
+
+        print("4/4  Saving multi-pass report...")
+        run_dir, overall_pct = save_multipass_run(
+            report_dir      = args.report_dir,
+            file_key        = args.file_key,
+            node_id         = args.node_id,
+            screen_name     = args.screen_name,
+            figma_full_img  = figma_full,
+            section_results = section_results,
+            platform        = platform_key,
+        )
+        print_multipass_report(
+            section_results = section_results,
+            overall_pct     = overall_pct,
+            report_dir      = args.report_dir,
+            run_dir         = run_dir,
+        )
+        return
+
+    # ── Single-screenshot modes ────────────────────────────────────────────────
     if args.skip_capture:
         if not Path(SIM_PATH).exists():
             print(f"ERROR: --skip-capture was set but no screenshot found at {SIM_PATH}.")
