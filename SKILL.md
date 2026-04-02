@@ -28,13 +28,18 @@ brew tap getsentry/xcodebuildmcp
 brew install xcodebuildmcp
 ```
 
-Then add to `~/.cursor/mcp.json` under `mcpServers` — use the **full path** (Cursor doesn't inherit terminal PATH):
+Then add to `~/.cursor/mcp.json` under `mcpServers` — use the **full path** (Cursor doesn't inherit terminal PATH), and include the `env` block to enable UI automation:
 ```json
 "XcodeBuildMCP": {
   "command": "/opt/homebrew/bin/xcodebuildmcp",
-  "args": ["mcp"]
+  "args": ["mcp"],
+  "env": {
+    "XCODEBUILDMCP_ENABLED_WORKFLOWS": "simulator,ui-automation"
+  }
 }
 ```
+
+The `ui-automation` workflow is required for tap, swipe, and navigation tools. Without it, XcodeBuildMCP only provides screenshot and build tools — the agent will be able to see the screen but will not be able to tap buttons or navigate between screens.
 
 The user must also grant **Accessibility** and **Screen Recording** permissions to Cursor in System Settings → Privacy & Security. Without these, XcodeBuildMCP cannot tap or capture screenshots.
 

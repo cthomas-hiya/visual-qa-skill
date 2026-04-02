@@ -65,14 +65,19 @@ brew tap getsentry/xcodebuildmcp
 brew install xcodebuildmcp
 ```
 
-Then open `~/.cursor/mcp.json` and add this under `mcpServers`. Use the **full path** — Cursor can't find `xcodebuildmcp` by name alone because it doesn't inherit your terminal's PATH:
+Then open `~/.cursor/mcp.json` and add this under `mcpServers`. Use the **full path** — Cursor can't find `xcodebuildmcp` by name alone because it doesn't inherit your terminal's PATH. Include the `env` block to enable UI automation tools:
 
 ```json
 "XcodeBuildMCP": {
   "command": "/opt/homebrew/bin/xcodebuildmcp",
-  "args": ["mcp"]
+  "args": ["mcp"],
+  "env": {
+    "XCODEBUILDMCP_ENABLED_WORKFLOWS": "simulator,ui-automation"
+  }
 }
 ```
+
+The `env` block is important — without it, XcodeBuildMCP only enables screenshot and build tools by default. The agent will be able to see the Simulator screen but won't be able to tap buttons or navigate to other screens.
 
 **Step 5 — Grant macOS permissions to Cursor**
 
@@ -224,6 +229,7 @@ On **mobile** (iOS and Android), the top ~7% of the screenshot (status bar) and 
 | "No image URL returned" | The node ID may still have dashes — convert to colons (`123-456` → `123:456`) |
 | Agent doesn't run commands | This skill requires **Agent mode** in Cursor. Look for the mode selector in the chat panel and switch from Ask to Agent |
 | XcodeBuildMCP not found | Run `brew install xcodebuildmcp`, add it to `~/.cursor/mcp.json` with the **full path** (`/opt/homebrew/bin/xcodebuildmcp`), and restart Cursor |
+| Agent can see the screen but can't tap or navigate | XcodeBuildMCP ships with UI automation disabled by default. Make sure the `env` block with `"XCODEBUILDMCP_ENABLED_WORKFLOWS": "simulator,ui-automation"` is in your `mcp.json` entry (see Step 4), then restart Cursor |
 | Agent can't tap or screenshot the Simulator | Grant **Accessibility** and **Screen Recording** permissions to Cursor in System Settings → Privacy & Security |
 | Agent uses an old/wrong script | If your project has its own `compare-screenshots.py` in a `scripts/` folder, delete or rename it — the agent may prefer the local copy over the skill |
 | Changes to rules or config aren't working | **Restart Cursor** and **start a new chat**. Config changes load on startup, and the agent caches context within a conversation |
