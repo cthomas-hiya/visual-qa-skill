@@ -28,13 +28,15 @@ brew tap getsentry/xcodebuildmcp
 brew install xcodebuildmcp
 ```
 
-Then add to `~/.cursor/mcp.json` under `mcpServers`:
+Then add to `~/.cursor/mcp.json` under `mcpServers` — use the **full path** (Cursor doesn't inherit terminal PATH):
 ```json
 "XcodeBuildMCP": {
-  "command": "xcodebuildmcp",
+  "command": "/opt/homebrew/bin/xcodebuildmcp",
   "args": ["mcp"]
 }
 ```
+
+The user must also grant **Accessibility** and **Screen Recording** permissions to Cursor in System Settings → Privacy & Security. Without these, XcodeBuildMCP cannot tap or capture screenshots.
 
 Restart Cursor after adding it. Check availability in a session with the `doctor` tool.
 
@@ -330,3 +332,19 @@ Use this when the screen width you're testing **differs from the Figma design wi
 | > 20% | FAIL — significant differences |
 
 On mobile (iOS / Android), the script skips the top 7% (status bar) and bottom 4% (home indicator) from scoring, since those contain OS-rendered UI that will always differ. On web, no regions are skipped (0% / 0%).
+
+---
+
+## Important notes
+
+### Always use the skill's script
+
+Always run `~/.cursor/skills/visual-qa/compare-screenshots.py` — never a local `scripts/compare-screenshots.py` or similar file within the project. If a project has an older local copy, ignore it and use the skill's version.
+
+### Project-level rule files
+
+If a project has a `.cursor/rules/` file that references this skill (e.g. a `screenshot-comparison.mdc`), that file must have `alwaysApply: true` in its frontmatter to take effect automatically. If set to `false` with no globs, the agent will not see the rule.
+
+### Restart and new chat required for config changes
+
+MCP servers, permissions, and rule files are loaded when Cursor starts. If any of these change, the user must **restart Cursor**. Additionally, the agent caches context within a conversation — always **start a new chat** after config changes to ensure they take effect.

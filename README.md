@@ -52,21 +52,42 @@ pip3 install Pillow
 
 XcodeBuildMCP lets the agent take its own screenshots from the iOS Simulator without you doing anything. It also enables interaction testing (tapping through flows) and animation recording.
 
+First, make sure Homebrew is installed. If running `brew --version` in Terminal gives "command not found", install it first:
+
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+
+Follow the "Next steps" it prints (adds `brew` to your PATH), then install XcodeBuildMCP:
+
 ```bash
 brew tap getsentry/xcodebuildmcp
 brew install xcodebuildmcp
 ```
 
-Then open `~/.cursor/mcp.json` and add this under `mcpServers`:
+Then open `~/.cursor/mcp.json` and add this under `mcpServers`. Use the **full path** — Cursor can't find `xcodebuildmcp` by name alone because it doesn't inherit your terminal's PATH:
 
 ```json
 "XcodeBuildMCP": {
-  "command": "xcodebuildmcp",
+  "command": "/opt/homebrew/bin/xcodebuildmcp",
   "args": ["mcp"]
 }
 ```
 
-Restart Cursor after saving.
+**Step 5 — Grant macOS permissions to Cursor**
+
+XcodeBuildMCP needs Cursor to have two macOS permissions so it can control the Simulator:
+
+1. Open **System Settings → Privacy & Security → Accessibility**
+   - Click the **+** button, find **Cursor** in Applications, and add it
+2. Open **System Settings → Privacy & Security → Screen Recording**
+   - Add **Cursor** here too
+
+Without these, the agent can see the Simulator but can't tap, swipe, or capture screenshots from it. You only need to do this once.
+
+**Step 6 — Restart Cursor**
+
+Quit Cursor completely and reopen it. MCP servers and permissions are only loaded on startup — changes won't take effect until you restart.
 
 ---
 
@@ -202,7 +223,10 @@ On **mobile** (iOS and Android), the top ~7% of the screenshot (status bar) and 
 | "iOS capture failed" | Make sure the iOS Simulator is open and a device is booted |
 | "No image URL returned" | The node ID may still have dashes — convert to colons (`123-456` → `123:456`) |
 | Agent doesn't run commands | This skill requires **Agent mode** in Cursor. Look for the mode selector in the chat panel and switch from Ask to Agent |
-| XcodeBuildMCP not found | Run `brew install xcodebuildmcp`, add it to `~/.cursor/mcp.json`, and restart Cursor |
+| XcodeBuildMCP not found | Run `brew install xcodebuildmcp`, add it to `~/.cursor/mcp.json` with the **full path** (`/opt/homebrew/bin/xcodebuildmcp`), and restart Cursor |
+| Agent can't tap or screenshot the Simulator | Grant **Accessibility** and **Screen Recording** permissions to Cursor in System Settings → Privacy & Security |
+| Agent uses an old/wrong script | If your project has its own `compare-screenshots.py` in a `scripts/` folder, delete or rename it — the agent may prefer the local copy over the skill |
+| Changes to rules or config aren't working | **Restart Cursor** and **start a new chat**. Config changes load on startup, and the agent caches context within a conversation |
 
 ---
 
