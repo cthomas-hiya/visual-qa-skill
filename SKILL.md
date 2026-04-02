@@ -249,25 +249,33 @@ Repeat for each section. You do not need to display `figma-ref-full.png`.
 
 ### Open the library (all run types)
 
-After displaying images, open the library so the user can view the full report. First get the expanded home directory path:
+After displaying images, start the local server (if not already running) and open the library:
+
+**1. Start the server in the background:**
 
 ```bash
-echo "$HOME/.visual-qa-reports/library.html"
+python3 ~/.cursor/skills/visual-qa/compare-screenshots.py --serve &
 ```
 
-Then use the `cursor-ide-browser` MCP tool to navigate to the resulting path, formatted as a `file://` URL:
+If the server is already running it will print "Server already running on port 7734" and exit — that's fine, proceed to step 2.
+
+If the port is in use by a different process, it will print an error with a `lsof` kill command. Run that command, then restart the server.
+
+**2. Open the library in the browser:**
+
+Use the `cursor-ide-browser` MCP tool to navigate to:
 
 ```
-file:///Users/<username>/.visual-qa-reports/library.html
+http://localhost:7734/library.html
 ```
 
 If `cursor-ide-browser` is not available, open it via shell:
 
 ```bash
-open ~/.visual-qa-reports/library.html
+open http://localhost:7734/library.html
 ```
 
-The library shows a card grid of all past runs — each card links to a self-contained report with the images, diff score, and region breakdown. Every new run automatically appends a new card and updates the library.
+The library shows a card grid of all past runs. Hovering a card reveals a delete button (×) in the top-right corner. Each card links to a detail report. Delete buttons on both pages require the server to be running — if the server isn't running, the button will show an error alert explaining how to start it.
 
 ---
 

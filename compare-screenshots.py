@@ -23,6 +23,10 @@ Options:
                                  is sliced into matching viewport chunks and each pair is diffed
                                  independently. Results are combined into one library card and report.
                                  Requires --skip-capture to be set (screenshots pre-captured via MCP).
+    --serve                      Start a local HTTP server on port 7734 that serves the report library
+                                 and handles DELETE requests for removing individual runs. Open
+                                 http://localhost:7734/library.html in the browser after starting.
+                                 Does not require a Figma token or screenshot capture.
 
 Requires:
     - ~/.figma_token or FIGMA_TOKEN env var (Figma personal access token)
@@ -31,7 +35,8 @@ Requires:
     - Android: adb (Android SDK / Android Studio)
     - Web:     pass --web-screenshot with a file captured by the browser MCP tool
 """
-import sys, os, io, json, shutil, base64, datetime, urllib.request, subprocess, argparse
+import sys, os, io, json, re, shutil, base64, datetime, urllib.request, urllib.error, subprocess, argparse
+import http.server, socketserver, threading
 from pathlib import Path
 
 try:
@@ -355,15 +360,46 @@ h1{font-size:24px;font-weight:700;letter-spacing:-0.5px}
 """
 
 
+def _delete_button_html():
+    """
+    Returns the HTML + JS for the delete action on report detail pages.
+    The folder name is derived at runtime from window.location.pathname
+    (second path segment, e.g. /2026-04-02T14-30-00_123-456/report.html).
+    """
+    return """<button class="del-btn" onclick="deleteThisRun()">Delete this run</button>
+<script>
+function deleteThisRun() {
+  if (!confirm('Delete this run?\\nThis cannot be undone.')) return;
+  var folder = window.location.pathname.split('/').filter(Boolean)[0];
+  fetch('/api/run/' + encodeURIComponent(folder), {method: 'DELETE'})
+    .then(function(r) {
+      if (!r.ok) throw new Error('Server returned ' + r.status);
+      window.location.href = '/library.html?deleted=1';
+    })
+    .catch(function() {
+      alert('Could not delete.\\nIs the server running?\\n\\nStart with:\\npython3 compare-screenshots.py --serve');
+    });
+}
+</script>"""
+
+
+_DELETE_BTN_STYLE = """
+.nav-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:24px}
+a.back{margin-bottom:0}
+.del-btn{background:none;border:none;color:#ef4444;font-size:13px;
+  cursor:pointer;padding:4px 0;opacity:.7;transition:opacity .15s}
+.del-btn:hover{opacity:1}
+"""
+
+
 def generate_run_report(run_dir, meta, figma_img, sim_img, diff_img, overlay_img):
     verdict = meta["verdict"]
     color   = VERDICT_COLOR[verdict]
     regions = meta["region_map"]
 
-    figma_b64   = img_to_b64(figma_img)
-    sim_b64     = img_to_b64(sim_img)
-    diff_b64    = img_to_b64(diff_img)
-    overlay_b64 = img_to_b64(overlay_img)
+    figma_b64 = img_to_b64(figma_img)
+    sim_b64   = img_to_b64(sim_img)
+    diff_b64  = img_to_b64(diff_img)
 
     ts_display = _format_timestamp(meta["timestamp"])
 
@@ -389,10 +425,13 @@ def generate_run_report(run_dir, meta, figma_img, sim_img, diff_img, overlay_img
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Visual QA — {meta['screen_name']}</title>
-<style>{_REPORT_BASE_STYLE}</style>
+<style>{_REPORT_BASE_STYLE}{_DELETE_BTN_STYLE}</style>
 </head>
 <body>
-<a class="back" href="../library.html">&#8592; Library</a>
+<div class="nav-row">
+  <a class="back" href="../library.html">&#8592; Library</a>
+  {_delete_button_html()}
+</div>
 <h1>{meta['screen_name']}</h1>
 <p class="meta">Node {meta['node_id']} &nbsp;&middot;&nbsp; {ts_display}</p>
 <div class="pill" style="background:{color}22;color:{color}">{verdict}</div>
@@ -401,7 +440,6 @@ def generate_run_report(run_dir, meta, figma_img, sim_img, diff_img, overlay_img
   <div class="panel"><div class="panel-label">Figma reference</div><img src="{figma_b64}" alt="Figma reference"></div>
   <div class="panel"><div class="panel-label">App screenshot</div><img src="{sim_b64}" alt="App screenshot"></div>
   <div class="panel"><div class="panel-label">Diff (red = different)</div><img src="{diff_b64}" alt="Diff"></div>
-  <div class="panel"><div class="panel-label">Side-by-side</div><img src="{overlay_b64}" alt="Side-by-side overlay"></div>
 </div>
 </body>
 </html>"""
@@ -432,10 +470,13 @@ def generate_inspect_report(run_dir, meta, figma_img, sim_img):
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Responsive Inspection — {meta['screen_name']}</title>
-<style>{_REPORT_BASE_STYLE}</style>
+<style>{_REPORT_BASE_STYLE}{_DELETE_BTN_STYLE}</style>
 </head>
 <body>
-<a class="back" href="../library.html">&#8592; Library</a>
+<div class="nav-row">
+  <a class="back" href="../library.html">&#8592; Library</a>
+  {_delete_button_html()}
+</div>
 <h1>{meta['screen_name']}</h1>
 <p class="meta">Node {meta['node_id']} &nbsp;&middot;&nbsp; {ts_display}</p>
 <div class="pill" style="background:{color}22;color:{color}">INSPECT — Responsive</div>
@@ -505,10 +546,6 @@ def generate_multipass_report(run_dir, meta, section_results):
       <div class="panel-label">Diff (red = different)</div>
       <img src="{img_to_b64(s['diff_img'])}" alt="Diff {i}">
     </div>
-    <div class="panel">
-      <div class="panel-label">Side-by-side</div>
-      <img src="{img_to_b64(s['overlay_img'])}" alt="Overlay {i}">
-    </div>
   </div>
   <div style="display:grid;grid-template-columns:80px 1fr 44px;gap:8px;
               align-items:center;margin-top:12px;font-size:12px;color:#a1a1aa">
@@ -558,10 +595,13 @@ def generate_multipass_report(run_dir, meta, section_results):
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Visual QA — {meta['screen_name']}</title>
-<style>{_REPORT_BASE_STYLE}</style>
+<style>{_REPORT_BASE_STYLE}{_DELETE_BTN_STYLE}</style>
 </head>
 <body>
-<a class="back" href="../library.html">&#8592; Library</a>
+<div class="nav-row">
+  <a class="back" href="../library.html">&#8592; Library</a>
+  {_delete_button_html()}
+</div>
 <h1>{meta['screen_name']}</h1>
 <p class="meta">
   Node {meta['node_id']} &nbsp;&middot;&nbsp; {ts_display}
@@ -616,21 +656,25 @@ def generate_library(report_dir):
             if rec_count else ""
         )
 
+        folder = run['folder']
         cards_html += f"""
-  <a class="card" href="{run['folder']}/report.html">
-    <div class="thumb"><img src="{thumb}" alt="" loading="lazy"></div>
-    <div class="card-body">
-      <div class="card-name">{name}</div>
-      <div class="card-meta">{ts}</div>
-      <div class="card-footer">
-        <span class="pill" style="background:{color}22;color:{color}">{v}</span>
-        <div style="display:flex;align-items:center;gap:8px">
-          {rec_badge}
-          <span class="diff">{sub}</span>
+  <div class="card-wrap" data-folder="{folder}">
+    <a class="card" href="{folder}/report.html">
+      <div class="thumb"><img src="{thumb}" alt="" loading="lazy"></div>
+      <div class="card-body">
+        <div class="card-name">{name}</div>
+        <div class="card-meta">{ts}</div>
+        <div class="card-footer">
+          <span class="pill" style="background:{color}22;color:{color}">{v}</span>
+          <div style="display:flex;align-items:center;gap:8px">
+            {rec_badge}
+            <span class="diff">{sub}</span>
+          </div>
         </div>
       </div>
-    </div>
-  </a>"""
+    </a>
+    <button class="card-delete" onclick="deleteRun(this,'{folder}')" title="Delete this run">&#x2715;</button>
+  </div>"""
 
     empty = "" if runs else '<p class="empty">No runs yet.</p>'
     count = f"{len(runs)} run{'s' if len(runs) != 1 else ''}"
@@ -649,10 +693,21 @@ header{{display:flex;align-items:baseline;justify-content:space-between;margin-b
 h1{{font-size:28px;font-weight:700;letter-spacing:-0.5px}}
 .count{{color:#52525b;font-size:14px}}
 .grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:16px}}
+.card-wrap{{position:relative}}
+.card-wrap:hover .card-delete{{opacity:1}}
 .card{{background:#141414;border:1px solid #27272a;border-radius:14px;overflow:hidden;
   text-decoration:none;color:inherit;display:block;
   transition:border-color .15s,transform .15s}}
 .card:hover{{border-color:#52525b;transform:translateY(-2px)}}
+.card-delete{{position:absolute;top:8px;right:8px;z-index:2;
+  width:26px;height:26px;border-radius:50%;border:none;cursor:pointer;
+  background:#ef444488;color:#fff;font-size:12px;line-height:1;
+  display:flex;align-items:center;justify-content:center;
+  opacity:0;transition:opacity .15s,background .15s;padding:0}}
+.card-delete:hover{{background:#ef4444}}
+.card-deleted{{background:#141414;border:1px dashed #27272a;border-radius:14px;
+  min-height:180px;display:flex;align-items:center;justify-content:center;
+  color:#3f3f46;font-size:13px}}
 .thumb{{background:#1e1e1e;aspect-ratio:3/1;overflow:hidden}}
 .thumb img{{width:100%;height:100%;object-fit:cover;display:block}}
 .card-body{{padding:14px 16px}}
@@ -666,6 +721,12 @@ h1{{font-size:28px;font-weight:700;letter-spacing:-0.5px}}
   background:#1d4ed822;color:#60a5fa;border:1px solid #1d4ed844}}
 .diff{{font-size:12px;color:#52525b}}
 .empty{{color:#52525b;grid-column:1/-1;text-align:center;padding:80px 0;font-size:14px}}
+.toast{{position:fixed;bottom:28px;left:50%;transform:translateX(-50%);
+  background:#27272a;color:#e4e4e7;font-size:13px;padding:10px 20px;
+  border-radius:8px;border:1px solid #3f3f46;pointer-events:none;
+  animation:toastIn .2s ease,toastOut .3s ease 2.7s forwards}}
+@keyframes toastIn{{from{{opacity:0;transform:translateX(-50%) translateY(8px)}}to{{opacity:1;transform:translateX(-50%) translateY(0)}}}}
+@keyframes toastOut{{to{{opacity:0;transform:translateX(-50%) translateY(8px)}}}}
 </style>
 </head>
 <body>
@@ -677,11 +738,123 @@ h1{{font-size:28px;font-weight:700;letter-spacing:-0.5px}}
 {cards_html}
 {empty}
 </div>
+<script>
+function deleteRun(btn, folder) {{
+  if (!confirm('Delete this run?\\nThis cannot be undone.')) return;
+  btn.disabled = true;
+  fetch('/api/run/' + encodeURIComponent(folder), {{method: 'DELETE'}})
+    .then(function(r) {{
+      if (!r.ok) throw new Error('Server returned ' + r.status);
+      var wrap = btn.closest('.card-wrap');
+      var ph = document.createElement('div');
+      ph.className = 'card-deleted';
+      ph.textContent = 'Run deleted';
+      wrap.replaceWith(ph);
+    }})
+    .catch(function() {{
+      btn.disabled = false;
+      alert('Could not delete.\\nIs the server running?\\n\\nStart with:\\npython3 compare-screenshots.py --serve');
+    }});
+}}
+(function() {{
+  if (!new URLSearchParams(window.location.search).has('deleted')) return;
+  history.replaceState(null, '', window.location.pathname);
+  var t = document.createElement('div');
+  t.className = 'toast';
+  t.textContent = 'Run deleted';
+  document.body.appendChild(t);
+  setTimeout(function() {{ t.remove(); }}, 3000);
+}})();
+</script>
 </body>
 </html>"""
 
     (report_dir / "library.html").write_text(html, encoding="utf-8")
     print(f"  Library updated   → {report_dir / 'library.html'}")
+
+
+SERVE_PORT = 7734
+_FOLDER_RE = re.compile(r'^\d{4}-\d{2}-\d{2}T[\w-]+$')  # e.g. 2026-04-02T14-30-00_123-456
+
+
+def serve_library(report_dir, port=SERVE_PORT):
+    """
+    Serve the report library on localhost and handle DELETE /api/run/<folder> requests.
+    Uses only Python's built-in http.server — no extra dependencies.
+    """
+    report_dir = Path(report_dir).resolve()
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(report_dir), **kwargs)
+
+        def do_DELETE(self):
+            # Only handle /api/run/<folder>
+            if not self.path.startswith("/api/run/"):
+                self.send_error(404)
+                return
+            folder = self.path[len("/api/run/"):].strip("/")
+            if not _FOLDER_RE.match(folder):
+                self.send_error(400, "Invalid folder name")
+                return
+            target = report_dir / folder
+            if not target.exists() or not target.is_dir():
+                self.send_error(404, "Run not found")
+                return
+            try:
+                shutil.rmtree(target)
+                generate_library(report_dir)
+            except Exception as e:
+                self.send_error(500, str(e))
+                return
+            body = b'{"ok":true}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_OPTIONS(self):
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, DELETE, OPTIONS")
+            self.end_headers()
+
+        def log_message(self, fmt, *args):
+            pass  # suppress per-request logs; keep terminal clean
+
+    # Check if port is already in use before binding
+    try:
+        test = urllib.request.urlopen(
+            f"http://localhost:{port}/library.html", timeout=1
+        )
+        test.close()
+        print(f"  Server already running on port {port}.")
+        print(f"  Open → http://localhost:{port}/library.html")
+        return
+    except Exception:
+        pass  # port not responding — proceed to bind
+
+    try:
+        httpd = socketserver.TCPServer(("", port), Handler)
+        httpd.allow_reuse_address = True
+    except OSError as e:
+        print(f"ERROR: Could not start server on port {port}: {e}")
+        print(f"  A different process may be using port {port}.")
+        print(f"  Try: lsof -ti :{port} | xargs kill -9")
+        sys.exit(1)
+
+    print(f"  Visual QA server started → http://localhost:{port}/library.html")
+    print(f"  Serving: {report_dir}")
+    print(f"  Press Ctrl+C to stop.\n")
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        print("\n  Server stopped.")
+    finally:
+        httpd.server_close()
 
 
 def _make_run_dir(report_dir, node_id):
@@ -880,6 +1053,16 @@ def print_multipass_report(section_results, overall_pct, report_dir=None, run_di
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
+    # --serve is intercepted before argparse so it doesn't conflict with
+    # the required positional arguments (file_key, node_id).
+    if "--serve" in sys.argv:
+        p = argparse.ArgumentParser(add_help=False)
+        p.add_argument("--report-dir", default=str(REPORT_DIR_DEFAULT))
+        p.add_argument("--port", type=int, default=SERVE_PORT)
+        opts, _ = p.parse_known_args()
+        serve_library(opts.report_dir, opts.port)
+        return
+
     parser = argparse.ArgumentParser(
         description="Compare a Figma design against a live app or browser screenshot."
     )
