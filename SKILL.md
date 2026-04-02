@@ -227,6 +227,8 @@ Use whichever platform the user confirmed is running (iOS or Android command abo
 
 ## Step 5 — Display images and open library
 
+### Single-screenshot runs (standard, inspect, or responsive)
+
 Read and display all four output files inline in the chat:
 
 - `/tmp/figma-ref.png` — Figma reference
@@ -234,13 +236,38 @@ Read and display all four output files inline in the chat:
 - `/tmp/diff-highlighted.png` — red pixels = differences
 - `/tmp/diff-overlay.png` — 3-panel side-by-side
 
-Then open the library in the browser so the user can view the full report. Use the `cursor-ide-browser` MCP tool to navigate to:
+### Multi-pass runs (--sections)
+
+The tmp files above are not used. Instead, display the section pairs from the run folder. The script prints the run folder path at the end — use it to find the files. For each section (s01, s02, …), display:
+
+- `<run_folder>/figma-ref-s01.png` — Figma slice for section 1
+- `<run_folder>/sim-s01.png` — app screenshot for section 1
+- `<run_folder>/diff-s01.png` — diff for section 1
+- `<run_folder>/overlay-s01.png` — side-by-side for section 1
+
+Repeat for each section. You do not need to display `figma-ref-full.png`.
+
+### Open the library (all run types)
+
+After displaying images, open the library so the user can view the full report. First get the expanded home directory path:
+
+```bash
+echo "$HOME/.visual-qa-reports/library.html"
+```
+
+Then use the `cursor-ide-browser` MCP tool to navigate to the resulting path, formatted as a `file://` URL:
 
 ```
-~/.visual-qa-reports/library.html
+file:///Users/<username>/.visual-qa-reports/library.html
 ```
 
-The library shows a card grid of all past runs — each card links to a self-contained report with the 4 images, diff score, and region breakdown. Every new run automatically appends a new card and updates the library.
+If `cursor-ide-browser` is not available, open it via shell:
+
+```bash
+open ~/.visual-qa-reports/library.html
+```
+
+The library shows a card grid of all past runs — each card links to a self-contained report with the images, diff score, and region breakdown. Every new run automatically appends a new card and updates the library.
 
 ---
 
